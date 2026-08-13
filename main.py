@@ -16,7 +16,7 @@ def main():
     # 2. 初始化 Agent
     agent = SimpleReActAgent(llm)
     
-    print("🤖 智能研究助理 SRA (Phase 0) 已启动")
+    print("🤖 智能研究助理 SRA (Phase 1) 已启动")
     print("提示：输入 'exit' 退出程序\n")
     
     while True:
