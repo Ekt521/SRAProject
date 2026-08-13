@@ -1,12 +1,20 @@
 import numpy as np
+from pathlib import Path
 from typing import List, Dict, Tuple
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import re
 from collections import Counter
 
+# 项目根目录（本文件位于 knowledge/ 下，父目录的父目录即项目根）
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 class HybridVectorStore:
     def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
+        # 优先使用本地已下载的模型，避免每次联网拉取
+        local_model = PROJECT_ROOT / "models" / "bge-small-zh-v1.5"
+        if local_model.exists():
+            model_name = str(local_model)
         self.model = SentenceTransformer(model_name)
         self.chunks: List[Dict[str, str]] = []  # [{"id": 0, "content": "..."}]
         self.embeddings: np.ndarray = None       # (N, dim)
