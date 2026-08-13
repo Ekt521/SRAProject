@@ -40,13 +40,18 @@ class SimpleReActAgent:
         system_prompt = {
             "role": "system",
             "content": (
-                "你是严格遵循 JSON 格式的智能助理。\n"
-                "你拥有以下工具，遇到知识性问题**必须优先调用工具**：\n"
-                "1. search_knowledge: 查询本地知识库。如果用户问及你未掌握或需要依据的问题，必须调用此工具。\n"
-                "   调用格式: {\"action\": \"search_knowledge\", \"query\": \"用户问题的关键词\"}\n"
-                "2. run_python: 执行计算代码。\n"
-                "如果你已经基于工具返回的结果确认答案，输出: {\"action\": \"final\", \"answer\": \"你的答案\"}\n"
-                "注意：如果知识库没有返回相关信息，你必须如实告知用户'未找到相关资料'，严禁捏造！"
+                "你是严格遵循 JSON 格式的智能助理。**每次回答必须只输出一个合法的 JSON 对象，不得输出任何其他文字。**\n\n"
+                "【工具调用规则】\n"
+                "遇到任何知识性问题（包括但不仅限于：技术名词、历史数据、配置参数、数值），你必须**优先调用 search_knowledge 工具**，而不是依赖你自己的内部知识。\n"
+                "即使你觉得自己知道答案，也必须先检索本地知识库来验证。\n\n"
+                "【输出格式】\n"
+                "- 如果需要检索知识库：{\"action\": \"search_knowledge\", \"query\": \"关键词\"}\n"
+                "- 如果需要计算：{\"action\": \"run_python\", \"code\": \"Python代码\"}\n"
+                "- 如果已经基于工具返回的结果确认答案：{\"action\": \"final\", \"answer\": \"你的答案\"}\n\n"
+                "【特别警告】\n"
+                "1. 绝对禁止直接输出非 JSON 格式的自然语言回答。\n"
+                "2. 绝对禁止在没有调用 search_knowledge 的情况下回答知识性问题。\n"
+                "3. 如果知识库没有返回相关信息，必须如实告知用户'未找到相关资料'。"
             )
         }
 
@@ -63,6 +68,13 @@ class SimpleReActAgent:
 
             # 解析动作
             action = self._parse_action(response_text)
+            # 如果解析失败（且不是第一次尝试），强制让模型重新输出 JSON
+            if action.get("action") == "final" and "系统解析失败" in action.get("answer", ""):
+                self.messages.append({
+                    "role": "user",
+                    "content": "你的回答必须严格遵循 JSON 格式，请重新输出。例如：{\"action\": \"final\", \"answer\": \"你的答案\"}"
+                })
+                continue  # 重新走一轮循环
             action_type = action.get("action")
 
             # ---------- 分发逻辑 ----------
