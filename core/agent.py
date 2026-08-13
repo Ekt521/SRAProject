@@ -80,6 +80,42 @@ class SimpleReActAgent:
             # ---------- 分发逻辑 ----------
             if action_type == "final":
                 answer = action.get("answer", "任务完成")
+                # ========== Critic 校验开始 ==========
+                # 1. 检查有没有引用标签
+                citations = re.findall(r'\[citation:(\d+)\]', answer)
+                if not citations:
+                    print("[Critic] ⚠️ 拦截：回答缺少引用，强制重写")
+                    self.messages.append({
+                        "role": "user",
+                        "content": "❌ 你的回答缺少引用。请使用知识库检索结果中的 [citation:编号] 来支撑你的观点。如果知识库没有相关信息，请直接告知用户。"
+                    })
+                    continue  # 重新走循环，让 LLM 重新生成
+
+                # 2. 简单校验：获取最近一次检索到的原文（存储在 self.last_retrieved 中）
+                # 这里简化逻辑，假设你有办法拿到最近的检索文本
+                # 检查 answer 中的关键数字/名词是否出现在 citation 对应的原文中
+                # （实际生产环境会用 ROUGE-L 或 BERTScore，这里用简单的字符串包含）
+                if hasattr(self, 'last_retrieved_text'):
+                    # 取 Agent 回答中提到的数字
+                    numbers_in_answer = re.findall(r'\d+', answer)
+                    # 检查这些数字是否出现在原文中
+                    found = False
+                    for num in numbers_in_answer:
+                        if num in self.last_retrieved_text:
+                            found = True
+                            break
+                    if not found and len(numbers_in_answer) > 0:
+                        # 原文没有相关数字，怀疑胡编
+                        print(f"[Critic] ⚠️ 拦截：数字不匹配，怀疑胡编")
+                        self.messages.append({
+                            "role": "user",
+                            "content": f"⚠️ 校验失败：你回答中的数字 {numbers_in_answer} 在引用的原文中未找到对应内容。请重新检查并严格基于检索结果回答。"
+                        })
+                        continue
+                # ========== Critic 校验结束 ==========
+
+                # 校验通过，返回答案
+                print("[Critic] ✅ 校验通过，返回答案")
                 self.messages.append({"role": "assistant", "content": answer})
                 return answer
 
@@ -95,12 +131,17 @@ class SimpleReActAgent:
                     "content": f"代码执行结果 (Observation): {observation}"
                 })
 
+            # ---------- search_knowledge 工具 ----------
             elif action_type == "search_knowledge":
                 query = action.get("query", "")
                 if not query:
                     observation = "错误：查询参数为空，请提供有效的查询关键词。"
                 else:
+                    print(f"[Tool] 🔍 正在检索: {query}")
                     observation = search_knowledge(query)
+                    print(f"[Tool] 📄 检索结果: {observation[:150]}...")  # 打印前150字
+                    # 保存原文用于 Critic 校验
+                    self.last_retrieved_text = observation
                 
                 self.messages.append({
                     "role": "user",
