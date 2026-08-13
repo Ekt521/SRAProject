@@ -1,0 +1,87 @@
+import numpy as np
+from typing import List, Dict, Tuple
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import re
+from collections import Counter
+
+class HybridVectorStore:
+    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
+        self.model = SentenceTransformer(model_name)
+        self.chunks: List[Dict[str, str]] = []  # [{"id": 0, "content": "..."}]
+        self.embeddings: np.ndarray = None       # (N, dim)
+        self.bm25_index: Dict[str, List[int]] = {}  # 倒排索引
+
+    def add_chunks(self, chunks: List[Dict[str, str]]):
+        """添加分块并构建索引"""
+        self.chunks = chunks
+        texts = [c["content"] for c in chunks]
+        
+        # 1. 计算向量
+        print(f"🔢 正在向量化 {len(texts)} 个分块...")
+        self.embeddings = self.model.encode(texts, show_progress_bar=True)
+        
+        # 2. 构建 BM25 倒排索引（纯手写，不依赖库）
+        self.bm25_index.clear()
+        for idx, text in enumerate(texts):
+            # 分词（简单按空格和标点切，中文可用 jieba，这里先用正则）
+            words = re.findall(r'[\w\u4e00-\u9fa5]+', text)
+            for word in words:
+                if word not in self.bm25_index:
+                    self.bm25_index[word] = []
+                self.bm25_index[word].append(idx)
+
+    def _bm25_score(self, query: str, doc_idx: int) -> float:
+        """计算单个文档的 BM25 相关性（简化版，不含 IDF 调参）"""
+        words = re.findall(r'[\w\u4e00-\u9fa5]+', query)
+        score = 0.0
+        doc_text = self.chunks[doc_idx]["content"]
+        for word in words:
+            if word in self.bm25_index and doc_idx in self.bm25_index[word]:
+                # 简单统计词频
+                freq = doc_text.count(word)
+                score += freq / (freq + 1)  # 简化 BM25 公式
+        return score
+
+    def hybrid_search(self, query: str, top_k: int = 3, threshold: float = 0.5) -> List[Dict]:
+        """混合检索：向量 + BM25 + RRF 融合"""
+        if not self.chunks:
+            return []
+
+        # 1. 向量检索（语义）
+        q_emb = self.model.encode([query])
+        vec_scores = cosine_similarity(q_emb, self.embeddings)[0]  # 形状 (N,)
+        
+        # 2. BM25 检索（关键词）
+        bm25_scores = [self._bm25_score(query, i) for i in range(len(self.chunks))]
+        
+        # 3. RRF 融合（倒数排名融合）
+        # 获取向量检索的排名
+        vec_ranked = np.argsort(vec_scores)[::-1]
+        bm25_ranked = np.argsort(bm25_scores)[::-1]
+        
+        combined_scores = {}
+        k = 60  # RRF 常数
+        for rank, idx in enumerate(vec_ranked):
+            if vec_scores[idx] < threshold:  # 向量分数过低直接截断
+                break
+            combined_scores[idx] = combined_scores.get(idx, 0) + 1 / (k + rank + 1)
+        
+        for rank, idx in enumerate(bm25_ranked):
+            if bm25_scores[idx] <= 0:  # BM25 无匹配则跳过
+                continue
+            combined_scores[idx] = combined_scores.get(idx, 0) + 1 / (k + rank + 1)
+        
+        # 排序取 top_k
+        sorted_idx = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:top_k]
+        
+        results = []
+        for idx in sorted_idx:
+            results.append({
+                "id": self.chunks[idx]["id"],
+                "content": self.chunks[idx]["content"],
+                "score": combined_scores[idx],
+                "vec_score": float(vec_scores[idx]),
+                "bm25_score": float(bm25_scores[idx])
+            })
+        return results

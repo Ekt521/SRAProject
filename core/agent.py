@@ -1,7 +1,8 @@
 import json
 import re
 from typing import Dict, Any, List
-from tools.executor import safe_run_python  # 导入我们的工具
+from tools.executor import safe_run_python
+from tools.knowledge_tool import search_knowledge  # 新增导入
 
 class SimpleReActAgent:
     def __init__(self, llm_client):
@@ -35,17 +36,17 @@ class SimpleReActAgent:
         step_count = 0
         self.messages.append({"role": "user", "content": user_input})
 
-        # 构建系统提示词（告诉 Agent 现在有计算器工具了）
+        # 构建系统提示词（升级版：包含知识库工具）
         system_prompt = {
             "role": "system",
             "content": (
                 "你是严格遵循 JSON 格式的智能助理。\n"
-                "每次回答**必须**只输出一个合法的 JSON 对象，不要输出任何其他文字。\n"
-                "如果你知道最终答案，输出: {\"action\": \"final\", \"answer\": \"你的答案\"}\n"
-                "如果需要计算或逻辑验证，输出: {\"action\": \"run_python\", \"code\": \"Python代码\"}\n"
-                "无论问题多么简单，都不允许直接输出非 JSON 的文本。\n"
-                "示例：用户问'1+1等于？'，你必须输出 {\"action\": \"final\", \"answer\": \"2\"}，而不是'等于2'。"
-                "严禁编造不存在的答案，不确定的问题可以输出 '我不确定' 或 '无法回答'，但仍然要遵循 JSON 格式。"
+                "你拥有以下工具，遇到知识性问题**必须优先调用工具**：\n"
+                "1. search_knowledge: 查询本地知识库。如果用户问及你未掌握或需要依据的问题，必须调用此工具。\n"
+                "   调用格式: {\"action\": \"search_knowledge\", \"query\": \"用户问题的关键词\"}\n"
+                "2. run_python: 执行计算代码。\n"
+                "如果你已经基于工具返回的结果确认答案，输出: {\"action\": \"final\", \"answer\": \"你的答案\"}\n"
+                "注意：如果知识库没有返回相关信息，你必须如实告知用户'未找到相关资料'，严禁捏造！"
             )
         }
 
@@ -58,7 +59,7 @@ class SimpleReActAgent:
 
             # 调用 DeepSeek
             response_text = self.llm.chat(payload)
-            print(f"[Debug] 第{step_count}步返回: {response_text[:200]}...")  # 打印前200字调试
+            print(f"[Debug] 第{step_count}步返回: {response_text[:5000]}...")  # 打印前5000字调试
 
             # 解析动作
             action = self._parse_action(response_text)
@@ -75,21 +76,30 @@ class SimpleReActAgent:
                 if not code:
                     observation = "错误：代码为空，请提供有效代码。"
                 else:
-                    # 调用我们的沙盒执行器
                     observation = safe_run_python(code)
                 
-                # 将执行结果（Observation）塞回消息历史，让 LLM 继续思考
                 self.messages.append({
                     "role": "user", 
                     "content": f"代码执行结果 (Observation): {observation}"
                 })
-                # 循环继续，LLM 会基于这个结果决定是 final 还是修改代码
 
-            else:
-                # 未知动作
+            elif action_type == "search_knowledge":
+                query = action.get("query", "")
+                if not query:
+                    observation = "错误：查询参数为空，请提供有效的查询关键词。"
+                else:
+                    observation = search_knowledge(query)
+                
                 self.messages.append({
                     "role": "user",
-                    "content": f"错误：未知动作 {action_type}，请输出 final 或 run_python。"
+                    "content": f"知识库检索结果 (Observation): {observation}"
+                })
+
+            else:
+                # 未知动作：列出所有可用动作，引导模型纠正
+                self.messages.append({
+                    "role": "user",
+                    "content": f"错误：未知动作 '{action_type}'。可选动作: final, run_python, search_knowledge。请重新输出有效 JSON。"
                 })
 
         # 如果超出最大步数

@@ -1,8 +1,19 @@
-import os
+import sys
+sys.path.append('.')  # 确保能找到 tools
+
 from core.llm_client import DeepSeekClient
 from core.agent import SimpleReActAgent
+from tools.knowledge_tool import load_knowledge  # 新增导入
 
 def main():
+    # 0. 加载本地知识库（Phase 2 核心）
+    print("📚 正在加载本地知识库...")
+    try:
+        load_knowledge("data/sample.md")
+        print("📚 本地知识库加载完成。")
+    except FileNotFoundError:
+        print("⚠️ 警告: data/sample.md 未找到，知识库检索功能不可用。")
+
     # 1. 初始化客户端（记得在终端执行: export DEEPSEEK_API_KEY="sk-..."）
     try:
         llm = DeepSeekClient()
@@ -16,7 +27,7 @@ def main():
     # 2. 初始化 Agent
     agent = SimpleReActAgent(llm)
     
-    print("🤖 智能研究助理 SRA (Phase 1) 已启动")
+    print("🤖 智能研究助理 SRA (Phase 2) 已启动")
     print("提示：输入 'exit' 退出程序\n")
     
     while True:
