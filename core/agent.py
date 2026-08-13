@@ -39,12 +39,13 @@ class SimpleReActAgent:
         system_prompt = {
             "role": "system",
             "content": (
-                "你是一个智能研究助理，现在你拥有 `run_python` 工具。\n"
-                "如果你需要计算或逻辑验证，请输出: "
-                '{"action": "run_python", "code": "你的Python代码"} \n'
-                "如果你已经知道答案，输出: "
-                '{"action": "final", "answer": "你的回答"} \n'
-                "注意：代码必须用纯文本写在 code 字段里，不要用 Markdown。"
+                "你是严格遵循 JSON 格式的智能助理。\n"
+                "每次回答**必须**只输出一个合法的 JSON 对象，不要输出任何其他文字。\n"
+                "如果你知道最终答案，输出: {\"action\": \"final\", \"answer\": \"你的答案\"}\n"
+                "如果需要计算或逻辑验证，输出: {\"action\": \"run_python\", \"code\": \"Python代码\"}\n"
+                "无论问题多么简单，都不允许直接输出非 JSON 的文本。\n"
+                "示例：用户问'1+1等于？'，你必须输出 {\"action\": \"final\", \"answer\": \"2\"}，而不是'等于2'。"
+                "严禁编造不存在的答案，不确定的问题可以输出 '我不确定' 或 '无法回答'，但仍然要遵循 JSON 格式。"
             )
         }
 
@@ -57,7 +58,7 @@ class SimpleReActAgent:
 
             # 调用 DeepSeek
             response_text = self.llm.chat(payload)
-            print(f"[Debug] 第{step_count}步返回: {response_text[:100]}...")  # 打印前100字调试
+            print(f"[Debug] 第{step_count}步返回: {response_text[:200]}...")  # 打印前200字调试
 
             # 解析动作
             action = self._parse_action(response_text)
