@@ -2,13 +2,16 @@ import json
 import re
 from typing import Dict, Any, List
 from tools.executor import safe_run_python
-from tools.knowledge_tool import search_knowledge  # 新增导入
+from tools.knowledge_tool import search_knowledge
+from memory.memory_manager import MemoryManager
 
 class SimpleReActAgent:
     def __init__(self, llm_client):
         self.llm = llm_client
         self.messages: List[Dict[str, str]] = []
         self.max_steps = 5  # 防止 Agent 无限思考
+        self.memory = MemoryManager()  # 新增
+        self.last_retrieved_text = ""   # 已有
 
     def _parse_action(self, raw_text: str) -> Dict[str, Any]:
         """鲁棒的 JSON 解析器（增加对 DeepSeek 废话的包容）"""
@@ -36,24 +39,33 @@ class SimpleReActAgent:
         step_count = 0
         self.messages.append({"role": "user", "content": user_input})
 
-        # 构建系统提示词（升级版：包含知识库工具）
-        system_prompt = {
-            "role": "system",
-            "content": (
-                "你是严格遵循 JSON 格式的智能助理。**每次回答必须只输出一个合法的 JSON 对象，不得输出任何其他文字。**\n\n"
-                "【工具调用规则】\n"
-                "遇到任何知识性问题（包括但不仅限于：技术名词、历史数据、配置参数、数值），你必须**优先调用 search_knowledge 工具**，而不是依赖你自己的内部知识。\n"
-                "即使你觉得自己知道答案，也必须先检索本地知识库来验证。\n\n"
-                "【输出格式】\n"
-                "- 如果需要检索知识库：{\"action\": \"search_knowledge\", \"query\": \"关键词\"}\n"
-                "- 如果需要计算：{\"action\": \"run_python\", \"code\": \"Python代码\"}\n"
-                "- 如果已经基于工具返回的结果确认答案：{\"action\": \"final\", \"answer\": \"你的答案\"}\n\n"
-                "【特别警告】\n"
-                "1. 绝对禁止直接输出非 JSON 格式的自然语言回答。\n"
-                "2. 绝对禁止在没有调用 search_knowledge 的情况下回答知识性问题。\n"
-                "3. 如果知识库没有返回相关信息，必须如实告知用户'未找到相关资料'。"
-            )
-        }
+        # ========== 新增：长期记忆召回 ==========
+        memories = self.memory.recall(user_input)
+        memory_context = self.memory.format_memories(memories)
+        if memory_context:
+            print(f"[Memory] 📖 已召回 {len(memories)} 条相关记忆")
+
+        system_prompt_content = (
+            "你是严格遵循 JSON 格式的智能助理。**每次回答必须只输出一个合法的 JSON 对象，不得输出任何其他文字。**\n\n"
+            "【工具调用规则】\n"
+            "遇到任何知识性问题（包括但不仅限于：技术名词、历史数据、配置参数、数值），你必须**优先调用 search_knowledge 工具**，而不是依赖你自己的内部知识。\n"
+            "即使你觉得自己知道答案，也必须先检索本地知识库来验证。\n\n"
+            "【输出格式】\n"
+            "- 如果需要检索知识库：{\"action\": \"search_knowledge\", \"query\": \"关键词\"}\n"
+            "- 如果需要计算：{\"action\": \"run_python\", \"code\": \"Python代码\"}\n"
+            "- 如果已经基于工具返回的结果确认答案：{\"action\": \"final\", \"answer\": \"你的答案\"}\n\n"
+            "【特别警告】\n"
+            "1. 绝对禁止直接输出非 JSON 格式的自然语言回答。\n"
+            "2. 绝对禁止在没有调用 search_knowledge 的情况下回答知识性问题。\n"
+            "3. 如果知识库没有返回相关信息，必须如实告知用户'未找到相关资料'。"
+        )
+        
+        # ========== 新增：注入记忆上下文 ==========
+        if memory_context:
+            system_prompt_content += f"\n\n【重要参考】\n{memory_context}\n注意：上述是历史对话的记忆，仅作为参考。如果与当前知识库冲突，以知识库检索结果为准。"
+        # ========================================
+        
+        system_prompt = {"role": "system", "content": system_prompt_content}
 
         while step_count < self.max_steps:
             step_count += 1
@@ -84,6 +96,12 @@ class SimpleReActAgent:
                 # 1. 检查有没有引用标签
                 citations = re.findall(r'\[citation:(\d+)\]', answer)
                 if not citations:
+                    # 如果是"未找到"类的回答，允许通过
+                    if any(kw in answer for kw in ['未找到', '没有找到', '无相关', '无法提供']):
+                        print("[Critic] ℹ️ 未找到相关信息，允许通过")
+                        self.messages.append({"role": "assistant", "content": answer})
+                        return answer
+                    # 否则强制重写
                     print("[Critic] ⚠️ 拦截：回答缺少引用，强制重写")
                     self.messages.append({
                         "role": "user",
@@ -116,6 +134,7 @@ class SimpleReActAgent:
 
                 # 校验通过，返回答案
                 print("[Critic] ✅ 校验通过，返回答案")
+                self.memory.save(user_input, answer)  # 新增：保存到长期记忆
                 self.messages.append({"role": "assistant", "content": answer})
                 return answer
 
