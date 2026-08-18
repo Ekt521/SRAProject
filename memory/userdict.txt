@@ -1,0 +1,6 @@
+读操作 10 n
+写操作 10 n
+持久化 10 vn
+DeepSeek 10 nz
+Redis 10 nz
+知识库 10 n

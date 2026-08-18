@@ -3,7 +3,7 @@ import re
 from typing import Dict, Any, List
 from tools.executor import safe_run_python
 from tools.knowledge_tool import search_knowledge
-from memory.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager, HIGH_CONF_SCORE
 from tools.web_search import search_web  # 新增
 
 class SimpleReActAgent:
@@ -42,15 +42,18 @@ class SimpleReActAgent:
 
         # ========== 新增：长期记忆召回 ==========
         memories = self.memory.recall(user_input)
+        has_confident_memory = any(m["score"] >= HIGH_CONF_SCORE for m in memories)
         memory_context = self.memory.format_memories(memories)
         if memory_context:
-            print(f"[Memory] 📖 已召回 {len(memories)} 条相关记忆")
+            print(f"[Memory] 📖 已召回 {len(memories)} 条相关记忆"
+                  + ("（含高置信，直接回答）" if has_confident_memory else ""))
 
         system_prompt_content = (
             "你是严格遵循 JSON 格式的智能助理。**每次回答必须只输出一个合法的 JSON 对象，不得输出任何其他文字。**\n\n"
             "【工具调用规则】\n"
             "遇到任何知识性问题（包括但不仅限于：技术名词、历史数据、配置参数、数值），你必须**优先调用 search_knowledge 工具**，而不是依赖你自己的内部知识。\n"
-            "即使你觉得自己知道答案，也必须先检索本地知识库来验证。\n\n"
+            "即使你觉得自己知道答案，也必须先检索本地知识库来验证。\n"
+            "**例外**：如果【重要参考】中已有 ✅ 高置信记忆直接覆盖当前问题，则无需检索，直接基于记忆回答。\n\n"
             "【输出格式】\n"
             "- 如果需要检索知识库：{\"action\": \"search_knowledge\", \"query\": \"关键词\"}\n"
             "- 如果需要联网搜索（知识库无结果时）：{\"action\": \"search_web\", \"query\": \"关键词\"}\n"
@@ -62,9 +65,18 @@ class SimpleReActAgent:
             "3. 如果知识库没有返回相关信息，必须如实告知用户'未找到相关资料'。"
         )
         
-        # ========== 新增：注入记忆上下文 ==========
+        # ========== 新增：注入记忆上下文（按置信度分档） ==========
         if memory_context:
-            system_prompt_content += f"\n\n【重要参考】\n{memory_context}\n注意：上述是历史对话的记忆，仅作为参考。如果与当前知识库冲突，以知识库检索结果为准。"
+            base = f"\n\n【重要参考】\n{memory_context}"
+            if has_confident_memory:
+                base += (
+                    "\n✅ **上述高置信记忆已直接覆盖当前问题。**\n"
+                    "你必须直接基于记忆给出 final 回答，**禁止再调用 search_knowledge 或 search_web**。\n"
+                    "回答中请保留记忆开头的引用标记 [memory:编号]，例如 [memory:3]。"
+                )
+            else:
+                base += "\n注意：上述记忆仅作为参考。如果与当前知识库冲突，以知识库检索结果为准。"
+            system_prompt_content += base
         # ========================================
         
         system_prompt = {"role": "system", "content": system_prompt_content}
@@ -95,21 +107,22 @@ class SimpleReActAgent:
             if action_type == "final":
                 answer = action.get("answer", "任务完成")
                 # ========== Critic 校验开始 ==========
-                # 1. 检查有没有引用标签（支持 citation 和 source）
-                citations = re.findall(r'\[citation:(\d+)\]', answer)
-                sources = re.findall(r'\[source:[^\]]+\]', answer)
-                has_citation = bool(citations or sources)
-                if not has_citation:
-                    # 如果是"未找到"类的回答，允许通过
-                    if any(kw in answer for kw in ['未找到', '没有找到', '无相关', '无法提供']):
+                # 1. 检查有没有引用标签（支持 citation / source / memory）
+                has_citation = bool(re.search(r'\[citation:\d+\]', answer))
+                has_source = bool(re.search(r'\[source:https?://[^\]]+\]', answer))
+                has_memory = bool(re.search(r'\[memory:\d+\]', answer))
+
+                if not (has_citation or has_source or has_memory):
+                    # 如果回答包含“未找到”类关键词，允许通过
+                    if any(kw in answer for kw in ['未找到', '没有找到', '无相关']):
                         print("[Critic] ℹ️ 未找到相关信息，允许通过")
                         self.messages.append({"role": "assistant", "content": answer})
                         return answer
-                    # 否则强制重写
-                    print("[Critic] ⚠️ 拦截：回答缺少引用，强制重写")
+                    # 否则拦截重写
+                    print("[Critic] ⚠️ 拦截：缺少引用，强制重写")
                     self.messages.append({
                         "role": "user",
-                        "content": "❌ 你的回答缺少引用。请使用知识库检索结果中的 [citation:编号] 或联网搜索结果中的 [source:URL] 来支撑你的观点。如果知识库没有相关信息，请直接告知用户。"
+                        "content": "❌ 你的回答缺少有效引用。请使用 [citation:编号]（本地知识库）、[memory:编号]（历史记忆）或 [source:URL]（联网搜索）来支撑观点。"
                     })
                     continue  # 重新走循环，让 LLM 重新生成
 
@@ -117,7 +130,8 @@ class SimpleReActAgent:
                 # 这里简化逻辑，假设你有办法拿到最近的检索文本
                 # 检查 answer 中的关键数字/名词是否出现在 citation 对应的原文中
                 # （实际生产环境会用 ROUGE-L 或 BERTScore，这里用简单的字符串包含）
-                if hasattr(self, 'last_retrieved_text'):
+                # 记忆回答（[memory:N]）是历史事实，无本次检索原文可比对，跳过数字校验
+                if hasattr(self, 'last_retrieved_text') and not has_memory:
                     # 取 Agent 回答中提到的数字
                     numbers_in_answer = re.findall(r'\d+', answer)
                     # 检查这些数字是否出现在原文中
@@ -192,7 +206,7 @@ class SimpleReActAgent:
                 # 未知动作：列出所有可用动作，引导模型纠正
                 self.messages.append({
                     "role": "user",
-                    "content": f"错误：未知动作 '{action_type}'。可选动作: final, run_python, search_knowledge。请重新输出有效 JSON。"
+                    "content": f"错误：未知动作 '{action_type}'。可选动作: final, run_python, search_knowledge, search_web。请重新输出有效 JSON。"
                 })
 
         # 如果超出最大步数
