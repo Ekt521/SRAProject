@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 from tools.executor import safe_run_python
 from tools.knowledge_tool import search_knowledge
 from memory.memory_manager import MemoryManager
+from tools.web_search import search_web  # 新增
 
 class SimpleReActAgent:
     def __init__(self, llm_client):
@@ -52,6 +53,7 @@ class SimpleReActAgent:
             "即使你觉得自己知道答案，也必须先检索本地知识库来验证。\n\n"
             "【输出格式】\n"
             "- 如果需要检索知识库：{\"action\": \"search_knowledge\", \"query\": \"关键词\"}\n"
+            "- 如果需要联网搜索（知识库无结果时）：{\"action\": \"search_web\", \"query\": \"关键词\"}\n"
             "- 如果需要计算：{\"action\": \"run_python\", \"code\": \"Python代码\"}\n"
             "- 如果已经基于工具返回的结果确认答案：{\"action\": \"final\", \"answer\": \"你的答案\"}\n\n"
             "【特别警告】\n"
@@ -93,9 +95,11 @@ class SimpleReActAgent:
             if action_type == "final":
                 answer = action.get("answer", "任务完成")
                 # ========== Critic 校验开始 ==========
-                # 1. 检查有没有引用标签
+                # 1. 检查有没有引用标签（支持 citation 和 source）
                 citations = re.findall(r'\[citation:(\d+)\]', answer)
-                if not citations:
+                sources = re.findall(r'\[source:[^\]]+\]', answer)
+                has_citation = bool(citations or sources)
+                if not has_citation:
                     # 如果是"未找到"类的回答，允许通过
                     if any(kw in answer for kw in ['未找到', '没有找到', '无相关', '无法提供']):
                         print("[Critic] ℹ️ 未找到相关信息，允许通过")
@@ -105,7 +109,7 @@ class SimpleReActAgent:
                     print("[Critic] ⚠️ 拦截：回答缺少引用，强制重写")
                     self.messages.append({
                         "role": "user",
-                        "content": "❌ 你的回答缺少引用。请使用知识库检索结果中的 [citation:编号] 来支撑你的观点。如果知识库没有相关信息，请直接告知用户。"
+                        "content": "❌ 你的回答缺少引用。请使用知识库检索结果中的 [citation:编号] 或联网搜索结果中的 [source:URL] 来支撑你的观点。如果知识库没有相关信息，请直接告知用户。"
                     })
                     continue  # 重新走循环，让 LLM 重新生成
 
@@ -165,6 +169,23 @@ class SimpleReActAgent:
                 self.messages.append({
                     "role": "user",
                     "content": f"知识库检索结果 (Observation): {observation}"
+                })
+
+            # ---------- search_web 工具 ----------
+            elif action_type == "search_web":
+                query = action.get("query", "")
+                if not query:
+                    observation = "错误：查询参数为空，请提供有效的搜索关键词。"
+                else:
+                    print(f"[Tool] 🌐 正在联网搜索: {query}")
+                    observation = search_web(query)
+                    print(f"[Tool] 📄 搜索结果: {observation[:150]}...")
+                    # 保存检索原文（供 Critic 校验引用）
+                    self.last_retrieved_text = observation
+                
+                self.messages.append({
+                    "role": "user",
+                    "content": f"联网搜索结果 (Observation): {observation}"
                 })
 
             else:
