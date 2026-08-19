@@ -1,10 +1,10 @@
 import numpy as np
+import jieba
+import re
 from pathlib import Path
 from typing import List, Dict, Tuple
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-import re
-from collections import Counter
 
 # 项目根目录（本文件位于 knowledge/ 下，父目录的父目录即项目根）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -20,6 +20,12 @@ class HybridVectorStore:
         self.embeddings: np.ndarray = None       # (N, dim)
         self.bm25_index: Dict[str, List[int]] = {}  # 倒排索引
 
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        """中文分词：jieba 切词 + 过滤空白/纯标点"""
+        return [w for w in jieba.cut(text)
+                if w.strip() and re.match(r'^[\w一-龥]+$', w)]
+
     def add_chunks(self, chunks: List[Dict[str, str]]):
         """添加分块并构建索引"""
         self.chunks = chunks
@@ -32,8 +38,7 @@ class HybridVectorStore:
         # 2. 构建 BM25 倒排索引（纯手写，不依赖库）
         self.bm25_index.clear()
         for idx, text in enumerate(texts):
-            # 分词（简单按空格和标点切，中文可用 jieba，这里先用正则）
-            words = re.findall(r'[\w\u4e00-\u9fa5]+', text)
+            words = self._tokenize(text)
             for word in words:
                 if word not in self.bm25_index:
                     self.bm25_index[word] = []
@@ -41,7 +46,7 @@ class HybridVectorStore:
 
     def _bm25_score(self, query: str, doc_idx: int) -> float:
         """计算单个文档的 BM25 相关性（简化版，不含 IDF 调参）"""
-        words = re.findall(r'[\w\u4e00-\u9fa5]+', query)
+        words = self._tokenize(query)
         score = 0.0
         doc_text = self.chunks[doc_idx]["content"]
         for word in words:
@@ -85,9 +90,11 @@ class HybridVectorStore:
         
         results = []
         for idx in sorted_idx:
+            chunk = self.chunks[idx]
             results.append({
-                "id": self.chunks[idx]["id"],
-                "content": self.chunks[idx]["content"],
+                "id": chunk["id"],
+                "content": chunk["content"],
+                "source": chunk.get("source", "未知来源"),
                 "score": combined_scores[idx],
                 "vec_score": float(vec_scores[idx]),
                 "bm25_score": float(bm25_scores[idx])

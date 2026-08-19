@@ -1,18 +1,33 @@
 import json
 import re
+import jieba.analyse
 from typing import Dict, Any, List
 from tools.executor import safe_run_python
 from tools.knowledge_tool import search_knowledge
 from memory.memory_manager import MemoryManager, HIGH_CONF_SCORE
 from tools.web_search import search_web  # 新增
 
+# Critic 事实核对时忽略的引用/链接噪声词
+_ENG_NOISE = {'citation', 'source', 'memory', 'http', 'https', 'com', 'org', 'cn', 'www', 'html'}
+
 class SimpleReActAgent:
-    def __init__(self, llm_client):
+    def __init__(self, llm_client, memory_db: str = "storage/memory.db"):
         self.llm = llm_client
-        self.messages: List[Dict[str, str]] = []
         self.max_steps = 5  # 防止 Agent 无限思考
-        self.memory = MemoryManager()  # 新增
+        self.memory = MemoryManager(memory_db)
         self.last_retrieved_text = ""   # 已有
+        # 跨会话恢复：加载最近的对话历史作为上下文
+        self.messages: List[Dict[str, str]] = self.memory.load_conversation(limit=6)
+        if self.messages:
+            print(f"[Memory] 💬 已恢复 {len(self.messages)} 条历史对话")
+
+    def _finalize(self, user_input: str, answer: str) -> str:
+        """统一收尾：保存长期记忆 + 对话历史，追加 assistant 消息并返回"""
+        self.memory.save(user_input, answer)
+        self.memory.save_conversation("user", user_input)
+        self.memory.save_conversation("assistant", answer)
+        self.messages.append({"role": "assistant", "content": answer})
+        return answer
 
     def _parse_action(self, raw_text: str) -> Dict[str, Any]:
         """鲁棒的 JSON 解析器（增加对 DeepSeek 废话的包容）"""
@@ -116,8 +131,7 @@ class SimpleReActAgent:
                     # 如果回答包含“未找到”类关键词，允许通过
                     if any(kw in answer for kw in ['未找到', '没有找到', '无相关']):
                         print("[Critic] ℹ️ 未找到相关信息，允许通过")
-                        self.messages.append({"role": "assistant", "content": answer})
-                        return answer
+                        return self._finalize(user_input, answer)
                     # 否则拦截重写
                     print("[Critic] ⚠️ 拦截：缺少引用，强制重写")
                     self.messages.append({
@@ -126,35 +140,37 @@ class SimpleReActAgent:
                     })
                     continue  # 重新走循环，让 LLM 重新生成
 
-                # 2. 简单校验：获取最近一次检索到的原文（存储在 self.last_retrieved 中）
-                # 这里简化逻辑，假设你有办法拿到最近的检索文本
-                # 检查 answer 中的关键数字/名词是否出现在 citation 对应的原文中
-                # （实际生产环境会用 ROUGE-L 或 BERTScore，这里用简单的字符串包含）
-                # 记忆回答（[memory:N]）是历史事实，无本次检索原文可比对，跳过数字校验
+                # 2. 事实核对：数字匹配 + 关键词重叠
+                # 记忆回答（[memory:N]）是历史事实，无本次检索原文可比对，跳过核对
                 if hasattr(self, 'last_retrieved_text') and not has_memory:
-                    # 取 Agent 回答中提到的数字
+                    retrieved = self.last_retrieved_text
+
+                    # 2a. 数字核对：回答中的数字必须能在原文中找到
                     numbers_in_answer = re.findall(r'\d+', answer)
-                    # 检查这些数字是否出现在原文中
-                    found = False
-                    for num in numbers_in_answer:
-                        if num in self.last_retrieved_text:
-                            found = True
-                            break
-                    if not found and len(numbers_in_answer) > 0:
-                        # 原文没有相关数字，怀疑胡编
-                        print(f"[Critic] ⚠️ 拦截：数字不匹配，怀疑胡编")
+                    if numbers_in_answer and not any(num in retrieved for num in numbers_in_answer):
+                        print("[Critic] ⚠️ 拦截：数字不匹配，怀疑胡编")
                         self.messages.append({
                             "role": "user",
                             "content": f"⚠️ 校验失败：你回答中的数字 {numbers_in_answer} 在引用的原文中未找到对应内容。请重新检查并严格基于检索结果回答。"
+                        })
+                        continue
+
+                    # 2b. 关键词重叠：回答应共享检索原文的关键名词，防止跑题胡编
+                    answer_kw = {t for t in jieba.analyse.extract_tags(answer, topK=8)
+                                 if t.lower() not in _ENG_NOISE}
+                    retrieved_kw = set(jieba.analyse.extract_tags(retrieved, topK=15))
+                    if len(answer_kw) >= 3 and not (answer_kw & retrieved_kw):
+                        print("[Critic] ⚠️ 拦截：回答与检索原文主题不符")
+                        self.messages.append({
+                            "role": "user",
+                            "content": "⚠️ 校验失败：你的回答与检索原文主题关联过弱（关键词零重叠）。请严格基于检索结果回答，不要编造或跑题。"
                         })
                         continue
                 # ========== Critic 校验结束 ==========
 
                 # 校验通过，返回答案
                 print("[Critic] ✅ 校验通过，返回答案")
-                self.memory.save(user_input, answer)  # 新增：保存到长期记忆
-                self.messages.append({"role": "assistant", "content": answer})
-                return answer
+                return self._finalize(user_input, answer)
 
             elif action_type == "run_python":
                 code = action.get("code", "")
@@ -209,5 +225,21 @@ class SimpleReActAgent:
                     "content": f"错误：未知动作 '{action_type}'。可选动作: final, run_python, search_knowledge, search_web。请重新输出有效 JSON。"
                 })
 
-        # 如果超出最大步数
-        return "任务超出最大尝试次数 (5次)，请简化问题或检查逻辑。"
+        # 如果超出最大步数：基于已有工具结果强制总结，而不是直接失败
+        print("[Agent] ⚠️ 超出最大步数，尝试基于已有结果强制总结...")
+        try:
+            force_messages = self.messages[-6:]  # 切片副本，不污染 self.messages
+            force_messages.append({
+                "role": "user",
+                "content": "你已尝试多步但未得出结论。请**基于以上已获取的工具结果**直接给出 final 答案（JSON 格式）。若信息不足，明确说明哪些信息无法获取。"
+            })
+            force_text = self.llm.chat([system_prompt] + force_messages)
+            action = self._parse_action(force_text)
+            if action.get("action") == "final":
+                answer = action.get("answer", "任务完成")
+                print("[Agent] ✅ 强制总结成功")
+                return self._finalize(user_input, answer)
+            print("[Agent] ⚠️ 强制总结未返回 final，放弃")
+        except Exception as e:
+            print(f"[Agent] ❌ 强制总结失败: {e}")
+        return "任务超出最大尝试次数 (5次)，已尝试总结但仍未得到有效答案。请简化问题或检查逻辑。"

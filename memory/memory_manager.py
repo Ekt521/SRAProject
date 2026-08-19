@@ -76,10 +76,11 @@ class MemoryManager:
 
         self.conn = sqlite3.connect(db_path)
         self.cursor = self.conn.cursor()
+        self.db_path = db_path
         self._init_table()
 
     def _init_table(self):
-        """创建记忆表"""
+        """创建记忆表 + 会话表"""
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS episodic_memory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,8 +90,34 @@ class MemoryManager:
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # 跨会话对话历史（用于重启后恢复上下文）
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversation (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,       -- 'user' / 'assistant'
+                content TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         self.conn.commit()
-        print("[Memory] ✅ 数据库初始化完成 (storage/memory.db)")
+        print(f"[Memory] ✅ 数据库初始化完成 ({self.db_path})")
+
+    # ---------- 会话持久化 ----------
+    def save_conversation(self, role: str, content: str) -> None:
+        """保存一条对话记录"""
+        self.cursor.execute(
+            "INSERT INTO conversation (role, content) VALUES (?, ?)",
+            (role, content)
+        )
+        self.conn.commit()
+
+    def load_conversation(self, limit: int = 6) -> List[Dict[str, str]]:
+        """加载最近的对话历史（按时间正序返回）"""
+        rows = self.cursor.execute(
+            "SELECT role, content FROM conversation ORDER BY id DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
     def _extract_entities(self, query: str, answer: str = "") -> List[str]:
         """
