@@ -138,9 +138,9 @@ class MemoryManager:
         entities = self._extract_entities(query, answer)
         entities_json = json.dumps(entities, ensure_ascii=False)
 
-        # 1. 检查最近1小时内是否有完全相同的 query
+        # 1. 检查最近1天内是否有完全相同的 query
         self.cursor.execute(
-            "SELECT id FROM episodic_memory WHERE query = ? AND timestamp >= datetime('now', '-1 hour') ORDER BY timestamp DESC LIMIT 1",
+            "SELECT id FROM episodic_memory WHERE query = ? AND timestamp >= datetime('now', '-1 day') ORDER BY timestamp DESC LIMIT 1",
             (query,)
         )
         row = self.cursor.fetchone()
