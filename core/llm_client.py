@@ -26,10 +26,13 @@ class DeepSeekClient:
             )
         
         self.model = model
-        self.base_url = "https://api.deepseek.com/chat/completions"
+        self.base_url = os.getenv(
+            "DEEPSEEK_BASE_URL",
+            "https://api.deepseek.com/chat/completions",
+        ).rstrip("/")
         
     def chat(self, messages: List[Dict[str, str]], temperature: float = 0.3,
-             max_retries: int = 3, timeout: int = 30) -> str:
+             max_retries: int = 1, timeout: int = 30) -> str:
         """
         手写 DeepSeek 调用，带指数退避重试。
         temperature 设为 0.3：既要逻辑性，又要避免 0 温度导致的无限重复循环

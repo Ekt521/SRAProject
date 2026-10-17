@@ -13,7 +13,7 @@ _ENG_NOISE = {'citation', 'source', 'memory', 'http', 'https', 'com', 'org', 'cn
 class SimpleReActAgent:
     def __init__(self, llm_client, memory_db: str = "storage/memory.db"):
         self.llm = llm_client
-        self.max_steps = 5  # 防止 Agent 无限思考
+        self.max_steps = 8  # 防止 Agent 无限思考
         self.memory = MemoryManager(memory_db)
         self.last_retrieved_text = ""   # 已有
         # 跨会话恢复：加载最近的对话历史作为上下文
@@ -192,7 +192,7 @@ class SimpleReActAgent:
                 else:
                     print(f"[Tool] 🔍 正在检索: {query}")
                     observation = search_knowledge(query)
-                    print(f"[Tool] 📄 检索结果: {observation[:150]}...")  # 打印前150字
+                    print(f"[Tool] 📄 检索结果: {observation[:5000]}...")  # 打印前5000字
                     # 保存原文用于 Critic 校验
                     self.last_retrieved_text = observation
                 
@@ -209,7 +209,7 @@ class SimpleReActAgent:
                 else:
                     print(f"[Tool] 🌐 正在联网搜索: {query}")
                     observation = search_web(query)
-                    print(f"[Tool] 📄 搜索结果: {observation[:150]}...")
+                    print(f"[Tool] 📄 搜索结果: {observation[:5000]}...")
                     # 保存检索原文（供 Critic 校验引用）
                     self.last_retrieved_text = observation
                 

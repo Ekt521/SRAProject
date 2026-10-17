@@ -1,0 +1,12 @@
+# 顶层直接依赖（sentence-transformers 会自动安装 torch/transformers 等）
+requests>=2.31
+python-dotenv>=1.0
+sentence-transformers>=3.0
+scikit-learn>=1.4
+numpy>=1.26
+jieba>=0.42
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# 联网搜索兜底（DuckDuckGo，可选：未安装时自动跳过）
+ddgs>=9.0
